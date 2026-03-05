@@ -15,11 +15,11 @@ class cfg():
     depth = 3
     stride = 1
     padding = 2
-    num_kernels = 6
-    num_pools = 5
+    num_kernels = 2
+    num_pools = 1
     batch_size = 10000
     num_batches = 5
-    mini_batch_size = 1000
+    mini_batch_size = 10
     max_iters = 5000
     learning_rate = 3e-4
 #############################
@@ -67,28 +67,33 @@ class Kernel(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        # 32x32x3
-        W, H, D = x.shape
-        print(x.shape)
+        # 1000x3x32x32
+        N, C, W, H = x.shape
+        batch_results = []
 
-        x = f.pad(x, [self.pad, self.pad, self.pad, self.pad], 'constant')
+        for n in range(N):
+            #3x32x32
+            inp = x[n]
+            inp = f.pad(inp, [self.pad, self.pad, self.pad, self.pad], 'constant')
+            print(inp.shape)
 
-        out = torch.tensor(())
-        # image p = 2 f = 5
-        # r = 0 then r = s then r = 2s until r = 32 + (2*2) - 5 + 1 = 32
-        for r in range(0, W + (2*self.pad) - self.width + 1, self.stride):
-            # same as above but for c
-            for c in range(0, W + (2*self.pad) - self.width + 1, self.stride):
-                # read into 32x32x3
-                # starting at [r][c] and going to [r+width][c+width]
-                # aka selecting the data the kernel should intake
-                # concatenate all data to create new activation map which should be size 28x28x1 without padding
-                out = torch.cat((out, self.ln(x[r:r+self.width, c:c+self.width].flatten())))
+            out = torch.tensor(())
+            # image p = 2 f = 5
+            # r = 0 then r = s then r = 2s until r = 32 + (2*2) - 5 + 1 = 32
+            for r in range(0, W + (2*self.pad) - self.width + 1, self.stride):
+                # same as above but for c
+                for c in range(0, W + (2*self.pad) - self.width + 1, self.stride):
+                    # read into 32x32x3
+                    # starting at [r][c] and going to [r+width][c+width]
+                    # aka selecting the data the kernel should intake
+                    # concatenate all data to create new activation map which should be size 28x28x1 without padding
+                    out = torch.cat((out, self.ln(inp[:, r:r+self.width, c:c+self.width].flatten())))
 
-        # With 2p 5f output is 32x32x1
-        out = out.view(W, H)
+            # With 2p 5f output is 32x32x1
+            out = out.view(W, H)
+            batch_results.append(out)
 
-        return out
+        return torch.stack(batch_results)
 
 class Conv(nn.Module):
     """Defines a Convolutional layer containing a number of Kernels"""
@@ -109,11 +114,10 @@ class Conv(nn.Module):
         self.kernels = nn.ModuleList([Kernel(f, d, s, p) for _ in range(n)])
 
     def forward(self, x):
-        out = torch.tensor(())
+        #1000x3x32x32
+        outs = [k(x) for k in self.kernels]
 
-        # for 6 kernels, output should be 32x32x6
-        for k in self.kernels:
-            out = torch.cat((out, k(x)))
+        out = torch.stack(outs, dim=1)
 
         out = f.relu(out)
 
@@ -127,12 +131,17 @@ class Net(nn.Module):
         """
         super().__init__()
         
-        self.kernels = nn.ModuleList([Conv(n, f, d, s, p) for _ in range(cfg.num_kernels)])
+        self.kernels = nn.ModuleList([
+            Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.depth, cfg.padding),
+            Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.num_kernels, cfg.padding),
+            Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.num_kernels, cfg.padding)
+            ])
+        
         self.pools = nn.ModuleList([nn.MaxPool3d(f) for _ in range(cfg.num_pools)])
         self.ln = nn.Linear(16, 10)
 
     def forward(self, x, targets=None):
-        for i in range(len(self.kernels)):
+        for i in tqdm(range(len(self.kernels))):
             x = self.kernels[i](x)
             if i != 0:
                 x = self.pools[i-1](x)
