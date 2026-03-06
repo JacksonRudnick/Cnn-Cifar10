@@ -5,7 +5,6 @@ import torch.nn as nn
 from torch.nn import functional as f
 import pickle
 import random
-from tqdm import tqdm
 import numpy as np
 
 # Hyper params
@@ -20,8 +19,10 @@ class cfg():
     batch_size = 10000
     num_batches = 5
     mini_batch_size = 10
-    max_iters = 5000
+    max_iters = 10
     learning_rate = 3e-4
+    pool_size = 2
+    device = ''
 #############################
 
 def unpickle(file) -> dict:
@@ -39,8 +40,13 @@ def get_batch(split):
     indices = random.sample(range(cfg.batch_size), cfg.mini_batch_size)
 
     xs = torch.tensor(data[b'data'][indices], dtype=torch.float32)
+    # Normalize the data to be between 0 and 1
+    xs /= 255.0
     xs = xs.view(-1, 3, 32, 32)
     ys = torch.tensor([data[b'labels'][i] for i in indices], dtype=torch.long)
+
+    xs = xs.to(cfg.device)
+    ys = ys.to(cfg.device)
 
     return (xs, ys)
         
@@ -75,9 +81,8 @@ class Kernel(nn.Module):
             #3x32x32
             inp = x[n]
             inp = f.pad(inp, [self.pad, self.pad, self.pad, self.pad], 'constant')
-            print(inp.shape)
 
-            out = torch.tensor(())
+            out = torch.tensor((), device=cfg.device)
             # image p = 2 f = 5
             # r = 0 then r = s then r = 2s until r = 32 + (2*2) - 5 + 1 = 32
             for r in range(0, W + (2*self.pad) - self.width + 1, self.stride):
@@ -133,23 +138,23 @@ class Net(nn.Module):
         
         self.kernels = nn.ModuleList([
             Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.depth, cfg.padding),
-            Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.num_kernels, cfg.padding),
             Conv(cfg.num_kernels, cfg.stride, cfg.width, cfg.num_kernels, cfg.padding)
             ])
         
-        self.pools = nn.ModuleList([nn.MaxPool3d(f) for _ in range(cfg.num_pools)])
-        self.ln = nn.Linear(16, 10)
+        self.pools = nn.ModuleList([nn.MaxPool2d(cfg.pool_size) for _ in range(cfg.num_pools)])
+        self.ln = nn.Linear(512, 10)
 
     def forward(self, x, targets=None):
-        for i in tqdm(range(len(self.kernels))):
+        for i in range(len(self.kernels)):
             x = self.kernels[i](x)
-            if i != 0:
+            if int(i) != 0:
                 x = self.pools[i-1](x)
 
         # 32x32x6 -> 28x28x6
         # 28x28x6 -> 24x24x6
         # 24 -> 20 -> 16
 
+        x = x.view(x.size(0), -1)
         x = self.ln(x)
 
         if targets == None:
@@ -159,11 +164,8 @@ class Net(nn.Module):
 
         return (x, loss)
 
-m = Net(cfg.num_kernels, cfg.stride, cfg.width, cfg.depth, cfg.padding)
-optimizer = torch.optim.Adam(m.parameters(), lr=cfg.learning_rate)
-
 def train():
-    for iter in tqdm(range(cfg.max_iters)):
+    for iter in range(cfg.max_iters):
         # 1000x3x32x32
         xs, ys = get_batch('train')
 
@@ -180,5 +182,16 @@ def test():
     print(f"Test Loss: {loss.item()}")
 
 if __name__ == "__main__":
+    if torch.cuda.is_available():
+        print("Using CUDA")
+        cfg.device = 'cuda'
+    else:
+        print("no cuda :(")
+        exit()
+
+    m = Net(cfg.num_kernels, cfg.stride, cfg.width, cfg.depth, cfg.padding)
+    optimizer = torch.optim.Adam(m.parameters(), lr=cfg.learning_rate)
+    m = m.to(cfg.device)
+
     train()
-    # test()
+    test()
